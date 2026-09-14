@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller 构建产物（exe 不入库：用 Release 发布或直接拷文件夹分发）
+build/
+dist/
+*.spec
+*.exe
+
+# 杂项
+*.log
+Thumbs.db
+desktop.ini

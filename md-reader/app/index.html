@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Markdown 阅读器</title>
+<link rel="stylesheet" href="/vendor/katex.min.css">
+<link rel="stylesheet" href="/vendor/hljs-light.css" id="hljs-light">
+<link rel="stylesheet" href="/vendor/hljs-dark.css" id="hljs-dark" disabled>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app">
+
+  <aside id="sidebar">
+    <div class="side-top">
+      <button class="icon-btn" id="btn-folder" title="打开文件夹  Ctrl+O">📁</button>
+      <button class="icon-btn" id="btn-file" title="打开单个文件  Ctrl+Shift+O">📄</button>
+      <div class="root-name" id="root-name" title="">未选择文件夹</div>
+      <button class="icon-btn" id="btn-refresh" title="刷新文件树">⟳</button>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-pane="pane-tree">文件</button>
+      <button class="tab" data-pane="pane-outline">大纲</button>
+      <button class="tab" data-pane="pane-recent">最近</button>
+    </div>
+
+    <div class="filter-row" id="filter-row">
+      <input id="filter" type="search" placeholder="筛选文件名，回车全文搜索" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="pane" id="pane-tree"></div>
+    <div class="pane hidden" id="pane-outline"></div>
+    <div class="pane hidden" id="pane-recent"></div>
+  </aside>
+
+  <div id="resizer" title="拖动调整宽度"></div>
+
+  <main id="main">
+    <header id="topbar">
+      <button class="icon-btn" id="btn-sidebar" title="侧边栏  Ctrl+B">☰</button>
+      <button class="icon-btn" id="btn-back" title="后退  Alt+←">‹</button>
+      <button class="icon-btn" id="btn-fwd" title="前进  Alt+→">›</button>
+      <div class="doc-title" id="doc-title">Markdown 阅读器</div>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="btn-find"  title="查找  Ctrl+F">🔍</button>
+      <button class="icon-btn" id="btn-width" title="切换正文宽度">⇔</button>
+      <button class="icon-btn" id="btn-fsdec" title="缩小字号  Ctrl+-">A-</button>
+      <button class="icon-btn" id="btn-fsinc" title="放大字号  Ctrl+=">A+</button>
+      <button class="icon-btn" id="btn-palette" title="背景调色">🎨</button>
+      <button class="icon-btn" id="btn-theme" title="主题">◐</button>
+      <button class="icon-btn" id="btn-print" title="导出 PDF / 打印  Ctrl+P">🖨</button>
+      <button class="icon-btn" id="btn-reveal" title="在资源管理器中显示">📂</button>
+    </header>
+
+    <div id="palette-pop" class="hidden">
+      <div class="pp-title">背景色（深色主题下不生效）</div>
+      <div class="pp-swatches">
+        <button class="sw" data-p="default" title="默认"   style="background:#ffffff"></button>
+        <button class="sw" data-p="sepia"   title="羊皮纸" style="background:#f9f2e0"></button>
+        <button class="sw" data-p="green"   title="护眼绿" style="background:#e8f2e8"></button>
+        <button class="sw" data-p="blue"    title="淡蓝"   style="background:#eaf2fa"></button>
+        <button class="sw" data-p="gray"    title="浅灰"   style="background:#f4f4f5"></button>
+        <label class="sw custom" title="自定义颜色"><input type="color" id="palette-custom" value="#fdf6ec"></label>
+      </div>
+    </div>
+
+    <div id="progress"><div id="progress-bar"></div></div>
+
+    <div id="scroller">
+      <article id="content" class="md">
+        <div class="empty-state">
+          <h2>轻量 Markdown 阅读器</h2>
+          <p>左上角 <b>📁</b> 选一个文件夹，或 <b>📄</b> 打开单个文件。</p>
+          <ul class="keys">
+            <li><kbd>Ctrl</kbd>+<kbd>O</kbd> 打开文件夹</li>
+            <li><kbd>Ctrl</kbd>+<kbd>B</kbd> 收起侧边栏</li>
+            <li><kbd>Ctrl</kbd>+<kbd>K</kbd> 快速跳转文件</li>
+            <li><kbd>Ctrl</kbd>+<kbd>F</kbd> 文内查找</li>
+            <li><kbd>Ctrl</kbd>+<kbd>P</kbd> 导出 PDF</li>
+            <li><kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> 前进后退</li>
+          </ul>
+        </div>
+      </article>
+    </div>
+
+    <footer id="status">
+      <span id="stat-words"></span>
+      <span id="stat-read"></span>
+      <span class="spacer"></span>
+      <span id="stat-path"></span>
+    </footer>
+  </main>
+
+  <div id="findbar" class="hidden">
+    <input id="find-input" type="text" placeholder="查找…" autocomplete="off" spellcheck="false">
+    <span id="find-count">0/0</span>
+    <button class="icon-btn" id="find-prev" title="上一个  Shift+Enter">↑</button>
+    <button class="icon-btn" id="find-next" title="下一个  Enter">↓</button>
+    <button class="icon-btn" id="find-close" title="关闭  Esc">✕</button>
+  </div>
+
+  <div id="lightbox" class="hidden"><img id="lightbox-img" alt=""></div>
+  <div id="toast"></div>
+</div>
+
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/vendor/katex.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

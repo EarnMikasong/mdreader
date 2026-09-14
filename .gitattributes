@@ -1,8 +1,17 @@
-# bat 是 GBK 编码 + CRLF，禁止 git 做任何换行/编码转换
+# ============================================================
+# 根 .gitattributes：全仓库通用
+# ============================================================
+
+# bat 脚本是 GBK 编码 + CRLF，禁止 git 做任何换行/编码转换
 *.bat -text
 
-# 二进制
+# 二进制文件（防止被当文本做 diff / 换行转换）
 *.exe binary
 *.ico binary
 *.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
 *.woff2 binary

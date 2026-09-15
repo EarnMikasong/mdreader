@@ -7,12 +7,18 @@ var TOKEN = new URLSearchParams(location.search).get('t') || '';
 
 var S = {
   root: '',
-  cur: null,            // { path, name, dir, mtime }
+  cur: null,            // { path, name, dir, mtime, digest }
   headings: [],
   history: [],
   hIdx: -1,
   searching: false,
-  treeData: null
+  treeData: null,
+  source: '',
+  editing: false,
+  editMode: null,       // null | visual（所见即所得）| source（Markdown 源码）
+  dirty: false,
+  diskChanged: false,
+  saving: false
 };
 
 /* ------------------------------------------------ 基础工具 */
@@ -27,6 +33,20 @@ function api(path, params) {
 
 function get(path, params) {
   return fetch(api(path, params)).then(function (r) { return r.json(); });
+}
+
+function post(path, body) {
+  return fetch(api(path), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function (r) {
+    return r.json().catch(function () { return { error: '服务器返回了无效响应' }; })
+      .then(function (d) {
+        if (!r.ok) { d.status = r.status; throw d; }
+        return d;
+      });
+  });
 }
 
 function toast(msg, ms) {
@@ -198,7 +218,9 @@ function renderMarkdown(src) {
     var m = pre.maths[+n];
     if (!m) return '';
     try {
-      return katex.renderToString(m.tex, { displayMode: m.block, throwOnError: false, output: 'html' });
+      return '<span class="md-math' + (m.block ? ' md-math-block' : '') +
+        '" data-md-math="' + esc(m.tex) + '" data-md-block="' + (m.block ? '1' : '0') + '">' +
+        katex.renderToString(m.tex, { displayMode: m.block, throwOnError: false, output: 'html' }) + '</span>';
     } catch (e) {
       return '<code class="math-err">' + esc(m.tex) + '</code>';
     }
@@ -209,12 +231,19 @@ function renderMarkdown(src) {
     var id = pre.refs[+n];
     var num = pre.noteIdx[id];
     if (!num) return '[^' + esc(id) + ']';
-    return '<sup><a class="fn-ref" id="fnref-' + esc(id) + '" href="#fn-' + esc(id) + '">[' + num + ']</a></sup>';
+    return '<sup class="md-fn-ref" data-md-footnote="' + esc(id) + '"><a class="fn-ref" id="fnref-' +
+      esc(id) + '" href="#fn-' + esc(id) + '">[' + num + ']</a></sup>';
   });
 
   /* 脚注区 */
   if (pre.notes.length) {
-    html += '<section class="footnotes"><ol>' + pre.notes.map(function (nt) {
+    var noteSource = pre.notes.map(function (nt) {
+      var noteLines = String(nt.md || '').split('\n');
+      return '[^' + nt.id + ']: ' + noteLines[0] + noteLines.slice(1).map(function (line) {
+        return '\n    ' + line;
+      }).join('');
+    }).join('\n\n');
+    html += '<section class="footnotes md-protected" data-md-source="' + esc(noteSource) + '"><ol>' + pre.notes.map(function (nt) {
       var body = marked.parse(nt.md || '').trim();
       var back = '<a class="fn-back" href="#fnref-' + esc(nt.id) + '" title="回到正文">↩</a>';
       body = /<\/p>$/.test(body) ? body.replace(/<\/p>$/, back + '</p>') : body + back;
@@ -223,7 +252,8 @@ function renderMarkdown(src) {
   }
 
   if (pre.meta.trim()) {
-    html = '<div class="front-matter">' + esc(pre.meta.trim()) + '</div>' + html;
+    html = '<div class="front-matter md-protected" data-md-source="---\n' + esc(pre.meta.trim()) +
+      '\n---">' + esc(pre.meta.trim()) + '</div>' + html;
   }
   return html;
 }
@@ -250,6 +280,7 @@ function enhance(root, docDir) {
 
   root.querySelectorAll('img').forEach(function (img) {
     var src = img.getAttribute('src') || '';
+    img.dataset.mdSrc = src;
     if (/^https?:/i.test(src)) {
       img.referrerPolicy = 'no-referrer';           // 绕过 CSDN / 知乎等图床的防盗链
     } else if (!/^(data:|blob:)/i.test(src)) {
@@ -258,6 +289,8 @@ function enhance(root, docDir) {
     img.addEventListener('error', function () {
       var span = document.createElement('span');
       span.className = 'img-broken';
+      span.dataset.mdImage = src;
+      span.dataset.mdAlt = img.alt || '';
       span.textContent = '🖼 图片缺失：' + src;
       img.replaceWith(span);
     });
@@ -269,6 +302,7 @@ function enhance(root, docDir) {
 
   root.querySelectorAll('a[href]').forEach(function (a) {
     var href = a.getAttribute('href') || '';
+    a.dataset.mdHref = href;
     if (/^(https?:|mailto:)/i.test(href)) {
       a.target = '_blank'; a.rel = 'noopener'; a.classList.add('ext');
     } else if (href.charAt(0) === '#') {
@@ -341,6 +375,8 @@ var mmId = 0;
 function renderMermaid(code) {
   var box = document.createElement('div');
   box.className = 'mermaid-box';
+  box.classList.add('md-protected');
+  box.dataset.mdMermaid = code.textContent;
   box.textContent = '图表渲染中…';
   code.parentElement.replaceWith(box);
   var src = code.textContent;
@@ -358,27 +394,299 @@ function renderMermaid(code) {
   });
 }
 
+/* ------------------------------------------------ 编辑 / 保存 */
+function updateEditStatus() {
+  var stat = $('#stat-edit');
+  var modeName = S.editMode === 'visual' ? '所见编辑' : '源码编辑';
+  stat.textContent = S.saving ? '保存中…' : (S.editing
+    ? (S.dirty ? '● 未保存 · ' + modeName : '已保存 · ' + modeName)
+    : (S.cur ? '点击正文直接编辑' : ''));
+  stat.classList.toggle('dirty', S.dirty);
+  $('#btn-save').disabled = !S.dirty || S.saving;
+  if (S.cur) {
+    var short = S.cur.name.replace(/\.(md|markdown|mdx|txt)$/i, '');
+    document.title = (S.dirty ? '● ' : '') + short + ' — Markdown 阅读器';
+  }
+}
+
+function setEditorMode(mode) {
+  S.editMode = mode || null;
+  S.editing = !!mode;
+  var visual = mode === 'visual';
+  var source = mode === 'source';
+  var content = $('#content');
+  $('#scroller').classList.toggle('editing', source);
+  content.classList.toggle('hidden', source);
+  content.classList.toggle('visual-editing', visual);
+  content.contentEditable = visual ? 'true' : 'false';
+  $('#editor-wrap').classList.toggle('hidden', !source);
+  $('#visual-tools').classList.toggle('hidden', !visual);
+  $('#btn-save').classList.toggle('hidden', !mode);
+  $('#btn-cancel').classList.toggle('hidden', !mode);
+  $('#btn-source').classList.toggle('hidden', !S.cur);
+  $('#btn-source').textContent = source ? '所见' : '源码';
+  $('#btn-source').title = source ? '切换所见编辑  Ctrl+E' : '切换 Markdown 源码编辑  Ctrl+E';
+  $('#btn-find').disabled = !!mode;
+  $('#btn-print').disabled = !!mode;
+  content.querySelectorAll('.md-protected, .md-math, img, .copy, .lang').forEach(function (el) {
+    if (visual) el.contentEditable = 'false';
+    else el.removeAttribute('contenteditable');
+  });
+  updateEditStatus();
+}
+
+function fallbackSourceOffset() {
+  var scroller = $('#scroller');
+  var max = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+  var pos = Math.round(S.source.length * scroller.scrollTop / max);
+  var lineStart = S.source.lastIndexOf('\n', pos);
+  return lineStart < 0 ? 0 : lineStart + 1;
+}
+
+function sourceOffsetForNode(node) {
+  if (!node) return fallbackSourceOffset();
+  var text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+  if (!text) return fallbackSourceOffset();
+  var lengths = [64, 40, 24, 12, 6];
+  for (var i = 0; i < lengths.length; i++) {
+    var needle = text.slice(0, lengths[i]);
+    if (needle.length < Math.min(6, text.length)) continue;
+    var at = S.source.indexOf(needle);
+    if (at > -1) return at;
+  }
+  return fallbackSourceOffset();
+}
+
+function enterSourceEdit(position) {
+  if (!S.cur) return;
+  if (S.editMode === 'source') { $('#editor').focus(); return; }
+  var source = S.editMode === 'visual' ? visualToMarkdown() : S.source;
+  $('#editor').value = source;
+  S.dirty = source !== S.source;
+  if (!S.editing) S.diskChanged = false;
+  setEditorMode('source');
+  var editor = $('#editor');
+  var pos = Math.max(0, Math.min(typeof position === 'number' ? position : 0, source.length));
+  editor.focus();
+  editor.setSelectionRange(pos, pos);
+  var line = source.slice(0, pos).split('\n').length;
+  var lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 28;
+  editor.scrollTop = Math.max(0, (line - 4) * lineHeight);
+}
+
+function enterVisualEdit(x, y) {
+  if (!S.cur) return;
+  if (S.editMode === 'visual') { $('#content').focus(); return; }
+  if (S.editMode === 'source') {
+    var source = $('#editor').value;
+    S.dirty = source !== S.source;
+    renderSource(source, S.cur.dir);
+  } else {
+    S.dirty = false;
+    S.diskChanged = false;
+  }
+  setEditorMode('visual');
+  var content = $('#content');
+  content.focus();
+  if (typeof x === 'number' && typeof y === 'number') {
+    var range = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+    if (range && content.contains(range.startContainer)) {
+      var sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(range);
+    }
+  }
+}
+
+function mdText(value) {
+  return String(value || '').replace(/\u00a0/g, ' ').replace(/\s*\n\s*/g, ' ')
+    .replace(/([\\`*_[\]<>])/g, '\\$1');
+}
+
+function inlineMarkdown(node) {
+  if (node.nodeType === Node.TEXT_NODE) return mdText(node.nodeValue);
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+  var el = node;
+  if (el.classList.contains('copy') || el.classList.contains('lang') || el.classList.contains('fn-back')) return '';
+  if (el.classList.contains('md-math')) {
+    var tex = el.dataset.mdMath || '';
+    return el.dataset.mdBlock === '1' ? '$$\n' + tex + '\n$$' : '$' + tex + '$';
+  }
+  if (el.classList.contains('md-fn-ref')) return '[^' + (el.dataset.mdFootnote || '') + ']';
+  if (el.tagName === 'IMG') {
+    return '![' + mdText(el.alt || '') + '](' + (el.dataset.mdSrc || el.getAttribute('src') || '') + ')';
+  }
+  if (el.classList.contains('img-broken') && el.dataset.mdImage) {
+    return '![' + mdText(el.dataset.mdAlt || '') + '](' + el.dataset.mdImage + ')';
+  }
+  if (el.tagName === 'BR') return '  \n';
+  var inner = Array.from(el.childNodes).map(inlineMarkdown).join('');
+  if (/^(STRONG|B)$/.test(el.tagName)) return '**' + inner + '**';
+  if (/^(EM|I)$/.test(el.tagName)) return '*' + inner + '*';
+  if (/^(DEL|S|STRIKE)$/.test(el.tagName)) return '~~' + inner + '~~';
+  if (el.tagName === 'CODE') {
+    var ticks = inner.indexOf('`') > -1 ? '``' : '`';
+    return ticks + inner + ticks;
+  }
+  if (el.tagName === 'A') {
+    var href = el.dataset.mdHref || el.getAttribute('href') || '';
+    return href.charAt(0) === '#' && el.classList.contains('fn-ref') ? inner : '[' + inner + '](' + href + ')';
+  }
+  return inner;
+}
+
+function listMarkdown(list, depth) {
+  depth = depth || 0;
+  var ordered = list.tagName === 'OL';
+  var start = parseInt(list.getAttribute('start') || '1', 10);
+  return Array.from(list.children).filter(function (el) { return el.tagName === 'LI'; }).map(function (li, index) {
+    var nested = Array.from(li.children).filter(function (el) { return /^(UL|OL)$/.test(el.tagName); });
+    var body = Array.from(li.childNodes).filter(function (node) {
+      return !(node.nodeType === Node.ELEMENT_NODE && /^(UL|OL)$/.test(node.tagName));
+    }).map(inlineMarkdown).join('').trim();
+    var cb = li.querySelector(':scope > input[type="checkbox"]');
+    if (cb) body = '[' + (cb.checked ? 'x' : ' ') + '] ' + body.replace(/^\[[ xX]\]\s*/, '');
+    var prefix = ordered ? (start + index) + '. ' : '- ';
+    var line = '  '.repeat(depth) + prefix + body;
+    nested.forEach(function (child) { line += '\n' + listMarkdown(child, depth + 1); });
+    return line;
+  }).join('\n');
+}
+
+function tableMarkdown(table) {
+  var rows = Array.from(table.querySelectorAll('tr')).map(function (tr) {
+    return Array.from(tr.children).map(function (cell) {
+      return inlineMarkdown(cell).trim().replace(/\|/g, '\\|');
+    });
+  });
+  if (!rows.length) return '';
+  var head = rows[0];
+  var out = ['| ' + head.join(' | ') + ' |', '| ' + head.map(function () { return '---'; }).join(' | ') + ' |'];
+  rows.slice(1).forEach(function (row) { out.push('| ' + row.join(' | ') + ' |'); });
+  return out.join('\n');
+}
+
+function blockMarkdown(el) {
+  if (el.nodeType === Node.TEXT_NODE) return mdText(el.nodeValue).trim();
+  if (el.nodeType !== Node.ELEMENT_NODE) return '';
+  if (el.dataset.mdSource) return el.dataset.mdSource;
+  if (el.dataset.mdMermaid !== undefined) return '```mermaid\n' + el.dataset.mdMermaid + '\n```';
+  if (el.classList.contains('code-wrap')) {
+    var codeEl = el.querySelector('pre > code');
+    var lang = codeEl && (codeEl.className.match(/language-([\w+#-]+)/) || [])[1] || '';
+    return '```' + lang + '\n' + (codeEl ? codeEl.textContent.replace(/\n$/, '') : '') + '\n```';
+  }
+  if (el.tagName === 'PRE') {
+    var code = el.querySelector('code');
+    var codeLang = code && (code.className.match(/language-([\w+#-]+)/) || [])[1] || '';
+    return '```' + codeLang + '\n' + (code ? code.textContent.replace(/\n$/, '') : el.textContent) + '\n```';
+  }
+  if (/^H[1-6]$/.test(el.tagName)) return '#'.repeat(+el.tagName[1]) + ' ' + inlineMarkdown(el).trim();
+  if (el.tagName === 'P') {
+    var onlyMath = el.children.length === 1 && el.firstElementChild.classList.contains('md-math-block');
+    return onlyMath ? '$$\n' + (el.firstElementChild.dataset.mdMath || '') + '\n$$' : inlineMarkdown(el).trim();
+  }
+  if (/^(UL|OL)$/.test(el.tagName)) return listMarkdown(el, 0);
+  if (el.tagName === 'BLOCKQUOTE') {
+    return Array.from(el.children).map(blockMarkdown).join('\n\n').split('\n').map(function (line) {
+      return '> ' + line;
+    }).join('\n');
+  }
+  if (el.tagName === 'TABLE') return tableMarkdown(el);
+  if (el.tagName === 'HR') return '---';
+  if (el.tagName === 'SECTION' && el.classList.contains('footnotes')) return el.dataset.mdSource || '';
+  var children = Array.from(el.children);
+  if (children.some(function (child) { return /^(DIV|P|H[1-6]|UL|OL|PRE|BLOCKQUOTE|TABLE|HR|SECTION)$/.test(child.tagName); })) {
+    return children.map(blockMarkdown).filter(Boolean).join('\n\n');
+  }
+  return inlineMarkdown(el).trim();
+}
+
+function visualToMarkdown() {
+  return Array.from($('#content').childNodes).map(blockMarkdown).filter(function (part) {
+    return part.trim() !== '';
+  }).join('\n\n').replace(/[ \t]+\n/g, '\n').trim() + '\n';
+}
+
+function renderSource(source, dir) {
+  var content = $('#content');
+  content.innerHTML = renderMarkdown(source);
+  enhance(content, dir);
+  updateWordCount(source);
+  buildOutline();
+}
+
+function saveDoc() {
+  if (!S.cur || !S.editing || !S.dirty || S.saving) return Promise.resolve(false);
+  S.saving = true;
+  updateEditStatus();
+  var mode = S.editMode;
+  var source = mode === 'visual' ? visualToMarkdown() : $('#editor').value;
+  return post('/api/save', {
+    path: S.cur.path, content: source, mtime: S.cur.mtime, digest: S.cur.digest
+  })
+    .then(function (d) {
+      S.source = source;
+      S.cur.mtime = d.mtime;
+      S.cur.digest = d.digest;
+      S.dirty = false;
+      S.diskChanged = false;
+      renderSource(S.source, S.cur.dir);
+      if (mode === 'visual') setEditorMode('visual');
+      updateEditStatus();
+      toast('已保存');
+      return true;
+    }).catch(function (err) {
+      if (err && err.status === 409) S.diskChanged = true;
+      toast(err && err.error || '保存失败，请稍后重试', 4200);
+      return false;
+    }).then(function (ok) {
+      S.saving = false;
+      updateEditStatus();
+      return ok;
+    });
+}
+
+function cancelEdit() {
+  if (!S.editing) return;
+  if (S.dirty && !window.confirm('当前修改尚未保存，确定放弃吗？')) return;
+  var restoreVisual = S.editMode === 'visual' && S.dirty;
+  var reload = S.diskChanged;
+  S.dirty = false;
+  S.diskChanged = false;
+  setEditorMode(null);
+  if (reload && S.cur) {
+    openDoc(S.cur.path, { keepScroll: true, noHistory: true });
+  } else if (restoreVisual && S.cur) {
+    renderSource(S.source, S.cur.dir);
+  } else {
+    updateWordCount(S.source);
+  }
+}
+
 /* ------------------------------------------------ 打开文档 */
 function openDoc(path, opt) {
   opt = opt || {};
+  if (S.dirty && !window.confirm('当前修改尚未保存，确定放弃并打开其他文档吗？')) {
+    return Promise.resolve(false);
+  }
   return get('/api/doc', { p: path }).then(function (d) {
     if (d.error) { toast(d.error); return; }
 
     var scroller = $('#scroller');
     var keepTop = opt.keepScroll ? scroller.scrollTop : null;
 
-    S.cur = { path: d.path, name: d.name, dir: d.dir, mtime: d.mtime };
-    var content = $('#content');
-    content.innerHTML = renderMarkdown(d.content);
-    enhance(content, d.dir);
+    S.cur = { path: d.path, name: d.name, dir: d.dir, mtime: d.mtime, digest: d.digest };
+    S.source = d.content;
+    S.dirty = false;
+    S.diskChanged = false;
+    setEditorMode(false);
+    renderSource(d.content, d.dir);
 
     var short = d.name.replace(/\.(md|markdown|mdx|txt)$/i, '');
     $('#doc-title').textContent = short;
     $('#doc-title').title = d.path;
     document.title = short + ' — Markdown 阅读器';
     $('#stat-path').textContent = d.path;
-    updateWordCount(d.content);
-    buildOutline();
     markCurrentInTree();
 
     if (!opt.noHistory) pushHistory(d.path);
@@ -414,9 +722,16 @@ function startWatch() {
   clearInterval(watchTimer);
   watchTimer = setInterval(function () {
     if (!S.cur) return;
-    get('/api/stat', { p: S.cur.path }).then(function (r) {
-      if (r.mtime && S.cur && r.mtime > S.cur.mtime + 0.001) {
-        openDoc(S.cur.path, { keepScroll: true, noHistory: true }).then(function () {
+    var watchedPath = S.cur.path;
+    get('/api/stat', { p: watchedPath }).then(function (r) {
+      if (r.mtime && S.cur && S.cur.path === watchedPath &&
+          Math.abs(r.mtime - S.cur.mtime) > 0.001) {
+        if (S.editing) {
+          if (!S.diskChanged) toast('磁盘上的文件已变化，保存前请重新载入', 4200);
+          S.diskChanged = true;
+          return;
+        }
+        openDoc(watchedPath, { keepScroll: true, noHistory: true }).then(function () {
           toast('文件已更新，已重新载入');
         });
       }
@@ -751,6 +1066,7 @@ function applySizes() {
   document.documentElement.style.setProperty('--fs', LS.get('fs', 16) + 'px');
   var w = LS.get('width', 860);
   $('#content').classList.toggle('w-full', w === 0);
+  $('#editor-wrap').classList.toggle('w-full', w === 0);
   if (w) document.documentElement.style.setProperty('--content-w', w + 'px');
   document.body.classList.toggle('no-sidebar', !LS.get('sidebar', true));
   var sw = LS.get('sidebarW', 280);
@@ -777,6 +1093,64 @@ function bind() {
   $('#btn-reveal').addEventListener('click', function () {
     if (S.cur) get('/api/reveal', { p: S.cur.path });
   });
+  $('#content').addEventListener('click', function (e) {
+    if (!S.cur) return;
+    if (S.editMode === 'visual') {
+      if (e.target.closest('a, .copy, img')) { e.preventDefault(); e.stopPropagation(); }
+      return;
+    }
+    if (S.editing) return;
+    if (e.target.closest('a, button, input, img, .mermaid-box, .katex')) return;
+    var block = e.target.closest(
+      'h1, h2, h3, h4, h5, h6, p, li, pre, blockquote, table, .front-matter'
+    );
+    if (block) enterVisualEdit(e.clientX, e.clientY);
+  });
+  $('#content').addEventListener('dblclick', function (e) {
+    if (S.editMode === 'visual' && e.target.closest('.md-protected, .md-math')) {
+      e.preventDefault(); enterSourceEdit(sourceOffsetForNode(e.target.closest('.md-protected, .md-math')));
+    }
+  });
+  $('#content').addEventListener('input', function () {
+    if (S.editMode !== 'visual') return;
+    S.dirty = visualToMarkdown() !== S.source;
+    updateWordCount(this.innerText);
+    updateEditStatus();
+  });
+  $('#btn-save').addEventListener('click', saveDoc);
+  $('#btn-cancel').addEventListener('click', cancelEdit);
+  $('#btn-source').addEventListener('click', function () {
+    if (S.editMode === 'source') enterVisualEdit();
+    else enterSourceEdit(S.editing ? fallbackSourceOffset() : 0);
+  });
+  $('#editor').addEventListener('input', function () {
+    S.dirty = this.value !== S.source;
+    updateWordCount(this.value);
+    updateEditStatus();
+  });
+  $('#editor').addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab') return;
+    e.preventDefault();
+    var start = this.selectionStart, end = this.selectionEnd;
+    this.setRangeText('  ', start, end, 'end');
+    this.dispatchEvent(new Event('input'));
+  });
+  $('#visual-tools').addEventListener('mousedown', function (e) {
+    if (e.target.closest('button')) e.preventDefault();
+  });
+  $('#block-style').addEventListener('change', function () {
+    document.execCommand('formatBlock', false, this.value);
+    $('#content').dispatchEvent(new Event('input'));
+    $('#content').focus();
+  });
+  [['#fmt-bold', 'bold'], ['#fmt-italic', 'italic'], ['#fmt-ul', 'insertUnorderedList'],
+   ['#fmt-ol', 'insertOrderedList']].forEach(function (item) {
+    $(item[0]).addEventListener('click', function () {
+      document.execCommand(item[1], false, null);
+      $('#content').dispatchEvent(new Event('input'));
+      $('#content').focus();
+    });
+  });
   $('#btn-print').addEventListener('click', function () { window.print(); });
   $('#btn-back').addEventListener('click', function () { goHistory(-1); });
   $('#btn-fwd').addEventListener('click', function () { goHistory(1); });
@@ -788,7 +1162,7 @@ function bind() {
     var order = ['light', 'dark', 'auto'];
     var next = order[(order.indexOf(LS.get('theme', 'light')) + 1) % 3];
     LS.set('theme', next); applyTheme();
-    if (S.cur && $('#content').querySelector('.mermaid-box')) {
+    if (!S.editing && S.cur && $('#content').querySelector('.mermaid-box')) {
       openDoc(S.cur.path, { keepScroll: true, noHistory: true });
     }
   });
@@ -879,6 +1253,17 @@ function bind() {
     var ctrl = e.ctrlKey || e.metaKey;
     var typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
 
+    if (ctrl && e.key.toLowerCase() === 's') {
+      if (S.editing) { e.preventDefault(); saveDoc(); }
+      return;
+    }
+    if (ctrl && e.key.toLowerCase() === 'e') {
+      e.preventDefault();
+      if (S.editMode === 'source') enterVisualEdit();
+      else enterSourceEdit(fallbackSourceOffset());
+      return;
+    }
+    if (S.editing) return;
     if (ctrl && e.key.toLowerCase() === 'f') { e.preventDefault(); openFind(); return; }
     if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); $('#btn-sidebar').click(); return; }
     if (ctrl && e.key.toLowerCase() === 'o') {
@@ -906,6 +1291,12 @@ function bind() {
 
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
     if (LS.get('theme', 'light') === 'auto') applyTheme();
+  });
+
+  window.addEventListener('beforeunload', function (e) {
+    if (!S.dirty) return;
+    e.preventDefault();
+    e.returnValue = '';
   });
 }
 

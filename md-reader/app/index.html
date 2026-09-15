@@ -44,6 +44,21 @@
       <button class="icon-btn" id="btn-fwd" title="前进  Alt+→">›</button>
       <div class="doc-title" id="doc-title">Markdown 阅读器</div>
       <div class="spacer"></div>
+      <div id="visual-tools" class="visual-tools hidden" aria-label="格式工具栏">
+        <select id="block-style" title="段落样式" aria-label="段落样式">
+          <option value="p">正文</option>
+          <option value="h1">标题 1</option>
+          <option value="h2">标题 2</option>
+          <option value="h3">标题 3</option>
+        </select>
+        <button class="icon-btn format-btn" id="fmt-bold" title="粗体 Ctrl+B"><b>B</b></button>
+        <button class="icon-btn format-btn" id="fmt-italic" title="斜体 Ctrl+I"><i>I</i></button>
+        <button class="icon-btn format-btn" id="fmt-ul" title="无序列表">•</button>
+        <button class="icon-btn format-btn" id="fmt-ol" title="有序列表">1.</button>
+      </div>
+      <button class="icon-btn action-btn primary hidden" id="btn-save" title="保存文档  Ctrl+S">保存</button>
+      <button class="icon-btn action-btn hidden" id="btn-cancel" title="返回阅读视图">完成</button>
+      <button class="icon-btn action-btn hidden" id="btn-source" title="切换 Markdown 源码编辑  Ctrl+E">源码</button>
       <button class="icon-btn" id="btn-find"  title="查找  Ctrl+F">🔍</button>
       <button class="icon-btn" id="btn-width" title="切换正文宽度">⇔</button>
       <button class="icon-btn" id="btn-fsdec" title="缩小字号  Ctrl+-">A-</button>
@@ -69,6 +84,9 @@
     <div id="progress"><div id="progress-bar"></div></div>
 
     <div id="scroller">
+      <div id="editor-wrap" class="hidden">
+        <textarea id="editor" aria-label="Markdown 编辑器" autocomplete="off" spellcheck="false"></textarea>
+      </div>
       <article id="content" class="md">
         <div class="empty-state">
           <h2>轻量 Markdown 阅读器</h2>
@@ -88,6 +106,7 @@
     <footer id="status">
       <span id="stat-words"></span>
       <span id="stat-read"></span>
+      <span id="stat-edit"></span>
       <span class="spacer"></span>
       <span id="stat-path"></span>
     </footer>

@@ -3,15 +3,18 @@
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 TOKEN = (Path.home() / ".mdreader" / "token").read_text(encoding="utf-8").strip()
 DOC = str(Path(__file__).resolve().parent / "示例文档" / "功能演示.md")
-URL = "http://127.0.0.1:7333/?t=%s#%s" % (TOKEN, DOC.replace("\\", "%5C"))
+PORT = int(os.environ.get("MDREADER_TEST_PORT", "7333"))
+URL = "http://127.0.0.1:%d/?t=%s#%s" % (PORT, TOKEN, DOC.replace("\\", "%5C"))
 
 errors = []
+SHOT_DIR = Path(tempfile.gettempdir())
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -57,7 +60,7 @@ with sync_playwright() as p:
     for k, v in checks.items():
         print("  %-14s %s" % (k, v))
 
-    page.screenshot(path="/tmp/shot_light.png", full_page=False)
+    page.screenshot(path=str(SHOT_DIR / "mdreader-shot-light.png"), full_page=False)
 
     # 大纲 / 站内跳转 / 查找 / 深色主题
     page.click('.tab[data-pane="pane-outline"]')
@@ -76,7 +79,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(1500)
     theme = page.evaluate("document.documentElement.dataset.theme")
     dark_ok = page.evaluate("!document.querySelector('#hljs-dark').disabled")
-    page.screenshot(path="/tmp/shot_dark.png", full_page=False)
+    page.screenshot(path=str(SHOT_DIR / "mdreader-shot-dark.png"), full_page=False)
 
     # 站内 md 链接跳转
     page.click("#btn-theme")          # dark -> auto

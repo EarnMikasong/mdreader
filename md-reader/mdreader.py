@@ -12,6 +12,7 @@ mdreader —— 轻量 Markdown 阅读器（Typora 的阅读替代品）
 只监听 127.0.0.1，接口需要用户目录下的私有 token，外部网页无法读取你的文件。
 """
 import argparse
+import hashlib
 import http.server
 import json
 import mimetypes
@@ -20,6 +21,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -37,6 +39,8 @@ MD_EXT = {".md", ".markdown", ".mdown", ".mkd", ".mdx", ".txt"}
 SKIP_DIRS = {".git", ".svn", ".hg", "node_modules", "__pycache__", ".idea", ".vscode",
              "venv", ".venv", "env", "dist", "build", ".next", ".cache", ".obsidian"}
 MAX_NODES = 8000
+MAX_EDIT_BYTES = 8_000_000
+MAX_BODY_BYTES = 12_000_000
 
 # ---------------------------------------------------------------- 运行期状态
 STATE = {
@@ -44,6 +48,7 @@ STATE = {
     "root": "",          # 当前文档库根目录
     "pending": [],       # 第二次启动时交接过来、等前端打开的文件
     "last_seen": 0.0,    # 前端最近一次轮询的时间
+    "opened": set(),     # 已通过 /api/doc 打开的文件，只有这些文件允许保存
 }
 
 
@@ -253,12 +258,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f = Path(q.get("p", [""])[0])
             if not f.is_file():
                 return self._err(404, "文件不存在")
+            raw = f.read_bytes()
             try:
-                text = f.read_text(encoding="utf-8")
+                text = raw.decode("utf-8")
             except UnicodeDecodeError:
-                text = f.read_text(encoding="gbk", errors="replace")
+                text = raw.decode("gbk", errors="replace")
+            STATE["opened"].add(str(f.resolve()))
             return self._json({"path": str(f), "name": f.name, "dir": str(f.parent),
-                               "mtime": f.stat().st_mtime, "content": text})
+                               "mtime": f.stat().st_mtime,
+                               "digest": hashlib.sha256(raw).hexdigest(), "content": text})
 
         if path == "/api/stat":
             f = Path(q.get("p", [""])[0])
@@ -303,6 +311,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         n = int(self.headers.get("Content-Length") or 0)
+        if n > MAX_BODY_BYTES:
+            return self._err(413, "内容过大，无法保存")
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode("utf-8"))
@@ -321,6 +331,79 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/prefs":
             save_prefs(body)
             return self._json({"ok": True})
+
+        if u.path == "/api/save":
+            path = body.get("path")
+            content = body.get("content")
+            expected_mtime = body.get("mtime")
+            expected_digest = body.get("digest")
+            if not isinstance(path, str) or not isinstance(content, str):
+                return self._err(400, "保存参数不完整")
+            try:
+                utf8_size = len(content.encode("utf-8"))
+            except UnicodeEncodeError:
+                return self._err(422, "文档包含无法保存的字符")
+            if utf8_size > MAX_EDIT_BYTES:
+                return self._err(413, "文档超过 8 MB，无法在编辑器中保存")
+
+            f = Path(path).resolve()
+            if str(f) not in STATE["opened"]:
+                return self._err(403, "只能保存已在阅读器中打开的文档")
+            if f.suffix.lower() not in MD_EXT:
+                return self._err(400, "只允许保存 Markdown 或文本文件")
+            if not f.is_file():
+                return self._err(404, "文件不存在")
+
+            try:
+                current_mtime = f.stat().st_mtime
+                if expected_mtime is not None and abs(current_mtime - float(expected_mtime)) > 0.001:
+                    return self._err(409, "文件已被其他程序修改，请先重新载入再编辑")
+
+                original = f.read_bytes()
+                if expected_digest and hashlib.sha256(original).hexdigest() != expected_digest:
+                    return self._err(409, "文件已被其他程序修改，请先重新载入再编辑")
+                try:
+                    original.decode("utf-8")
+                    encoding = "utf-8"
+                except UnicodeDecodeError:
+                    encoding = "gbk"
+
+                # textarea 会把换行统一成 LF；保存时沿用原文件的换行风格。
+                content = content.replace("\r\n", "\n")
+                if b"\r\n" in original:
+                    content = content.replace("\n", "\r\n")
+                try:
+                    payload = content.encode(encoding)
+                except UnicodeEncodeError:
+                    return self._err(422, "原文件使用 GBK 编码，新增字符无法保存；请先将文件转换为 UTF-8")
+
+                temp_name = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                            mode="wb", dir=str(f.parent), prefix=f.name + ".",
+                            suffix=".mdreader.tmp", delete=False) as temp:
+                        temp_name = temp.name
+                        temp.write(payload)
+                        temp.flush()
+                        os.fsync(temp.fileno())
+                    try:
+                        os.chmod(temp_name, f.stat().st_mode)
+                    except OSError:
+                        pass
+                    os.replace(temp_name, f)
+                    temp_name = None
+                finally:
+                    if temp_name:
+                        try:
+                            os.unlink(temp_name)
+                        except OSError:
+                            pass
+            except (OSError, ValueError):
+                return self._err(500, "保存失败：文件可能被占用或没有写入权限")
+
+            stat = f.stat()
+            return self._json({"ok": True, "mtime": stat.st_mtime, "size": stat.st_size,
+                               "digest": hashlib.sha256(payload).hexdigest()})
 
         return self._err(404, "unknown api")
 

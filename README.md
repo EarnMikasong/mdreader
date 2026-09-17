@@ -64,7 +64,6 @@
 mdreader 后端只使用 Python 3 标准库，无需安装第三方运行依赖：
 
 ```powershell
-cd md-reader
 python mdreader.py
 ```
 
@@ -75,7 +74,7 @@ python mdreader.py "README.md"
 python mdreader.py "D:\我的笔记"
 ```
 
-更完整的功能说明、文件结构和打包命令见 [`md-reader/说明.md`](./md-reader/说明.md)。
+更完整的功能说明、文件结构和打包命令见 [`说明.md`](./说明.md)。
 
 ## 隐私与安全
 

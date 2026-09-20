@@ -8,7 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-TOKEN = (Path.home() / ".mdreader" / "token").read_text(encoding="utf-8").strip()
+STATE_DIR = Path(os.environ.get("MDREADER_STATE_DIR", str(Path.home() / ".mdreader")))
+TOKEN = (STATE_DIR / "token").read_text(encoding="utf-8").strip()
 DOC = str(Path(__file__).resolve().parent / "示例文档" / "功能演示.md")
 PORT = int(os.environ.get("MDREADER_TEST_PORT", "7333"))
 URL = "http://127.0.0.1:%d/?t=%s#%s" % (PORT, TOKEN, DOC.replace("\\", "%5C"))

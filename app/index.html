@@ -50,15 +50,32 @@
           <option value="h1">标题 1</option>
           <option value="h2">标题 2</option>
           <option value="h3">标题 3</option>
+          <option value="h4">标题 4</option>
+          <option value="h5">标题 5</option>
+          <option value="h6">标题 6</option>
         </select>
+        <button class="icon-btn format-btn" id="fmt-undo" title="撤销 Ctrl+Z">↶</button>
+        <button class="icon-btn format-btn" id="fmt-redo" title="重做 Ctrl+Y">↷</button>
         <button class="icon-btn format-btn" id="fmt-bold" title="粗体 Ctrl+B"><b>B</b></button>
         <button class="icon-btn format-btn" id="fmt-italic" title="斜体 Ctrl+I"><i>I</i></button>
+        <button class="icon-btn format-btn" id="fmt-underline" title="下划线"><u>U</u></button>
+        <button class="icon-btn format-btn" id="fmt-strike" title="删除线"><s>S</s></button>
+        <button class="icon-btn format-btn" id="fmt-inline-code" title="行内代码">&lt;/&gt;</button>
+        <button class="icon-btn format-btn" id="fmt-link" title="插入链接">🔗</button>
         <button class="icon-btn format-btn" id="fmt-ul" title="无序列表">•</button>
         <button class="icon-btn format-btn" id="fmt-ol" title="有序列表">1.</button>
+        <button class="icon-btn format-btn" id="fmt-task" title="待办列表">☑</button>
+        <button class="icon-btn format-btn" id="fmt-quote" title="引用">❝</button>
+        <button class="icon-btn format-btn" id="fmt-code-block" title="代码块">{ }</button>
+        <button class="icon-btn format-btn" id="fmt-table" title="插入 3×3 表格">▦</button>
+        <button class="icon-btn format-btn" id="fmt-divider" title="分割线">—</button>
+        <button class="icon-btn format-btn" id="fmt-image" title="插入本地图片">▧</button>
       </div>
+      <button class="icon-btn action-btn hidden" id="btn-edit" title="编辑文档">编辑</button>
       <button class="icon-btn action-btn primary hidden" id="btn-save" title="保存文档  Ctrl+S">保存</button>
       <button class="icon-btn action-btn hidden" id="btn-cancel" title="返回阅读视图">完成</button>
       <button class="icon-btn action-btn hidden" id="btn-source" title="切换 Markdown 源码编辑  Ctrl+E">源码</button>
+      <button class="icon-btn" id="btn-comments" title="批注  Ctrl+Alt+M">💬</button>
       <button class="icon-btn" id="btn-find"  title="查找  Ctrl+F">🔍</button>
       <button class="icon-btn" id="btn-width" title="切换正文宽度">⇔</button>
       <button class="icon-btn" id="btn-fsdec" title="缩小字号  Ctrl+-">A-</button>
@@ -122,6 +139,27 @@
 
   <div id="lightbox" class="hidden"><img id="lightbox-img" alt=""></div>
   <div id="toast"></div>
+  <div id="comment-pop" class="hidden" role="dialog" aria-label="添加批注">
+    <button id="btn-add-comment">＋ 添加批注</button>
+  </div>
+  <aside id="comments-panel" class="hidden" aria-label="文档批注">
+  <div class="comments-head">
+    <div><strong>批注</strong><span id="comments-count">0</span></div>
+    <button class="icon-btn" id="btn-comments-close" title="关闭批注">✕</button>
+  </div>
+  <div id="comment-compose" class="hidden">
+    <div class="comment-compose-label">对这段文字添加批注</div>
+    <blockquote id="comment-quote"></blockquote>
+    <textarea id="comment-input" maxlength="4000" placeholder="写下你的想法、待办或修改建议…" spellcheck="false"></textarea>
+    <div class="comment-compose-actions">
+      <button class="comment-text-btn" id="btn-comment-cancel">取消</button>
+      <button class="comment-primary-btn" id="btn-comment-submit">添加批注</button>
+    </div>
+  </div>
+  <div id="comments-list" class="comments-list">
+    <div class="comments-empty">选中正文中的一段文字，即可添加侧边批注。</div>
+  </div>
+  </aside>
 </div>
 
 <script src="/vendor/marked.min.js"></script>

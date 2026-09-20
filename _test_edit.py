@@ -15,7 +15,8 @@ def main():
     parser.add_argument("--port", type=int, default=7333)
     args = parser.parse_args()
 
-    token = (Path.home() / ".mdreader" / "token").read_text(encoding="utf-8").strip()
+    state_dir = Path(os.environ.get("MDREADER_STATE_DIR", str(Path.home() / ".mdreader")))
+    token = (state_dir / "token").read_text(encoding="utf-8").strip()
     errors = []
     save_requests = []
     doc_responses = []

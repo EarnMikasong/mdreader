@@ -25,6 +25,8 @@ dist/
 # ---- 日志、临时文件 ----
 *.log
 *.tmp
+.test-state*/
+.release-staging/
 
 # ---- Windows 系统垃圾 ----
 Thumbs.db

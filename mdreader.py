@@ -26,6 +26,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import webbrowser
 from pathlib import Path
 
@@ -33,14 +34,18 @@ if getattr(sys, "frozen", False):                       # PyInstaller 打包后�
     APP_DIR = Path(getattr(sys, "_MEIPASS", ".")) / "app"
 else:
     APP_DIR = Path(__file__).resolve().parent / "app"
-STATE_DIR = Path.home() / ".mdreader"
+# 默认仍保存在用户目录。环境变量只用于隔离测试或便携运行，避免测试污染真实记录。
+STATE_DIR = Path(os.environ.get("MDREADER_STATE_DIR", str(Path.home() / ".mdreader"))).expanduser()
 DEFAULT_PORT = 7333
+APP_VERSION = "1.1.0"
 MD_EXT = {".md", ".markdown", ".mdown", ".mkd", ".mdx", ".txt"}
 SKIP_DIRS = {".git", ".svn", ".hg", "node_modules", "__pycache__", ".idea", ".vscode",
              "venv", ".venv", "env", "dist", "build", ".next", ".cache", ".obsidian"}
 MAX_NODES = 8000
 MAX_EDIT_BYTES = 8_000_000
 MAX_BODY_BYTES = 12_000_000
+MAX_COMMENT_BYTES = 8_000
+MAX_COMMENT_QUOTE = 700
 
 # ---------------------------------------------------------------- 运行期状态
 STATE = {
@@ -50,6 +55,7 @@ STATE = {
     "last_seen": 0.0,    # 前端最近一次轮询的时间
     "opened": set(),     # 已通过 /api/doc 打开的文件，只有这些文件允许保存
 }
+COMMENT_LOCK = threading.Lock()
 
 
 def load_token():
@@ -86,6 +92,91 @@ def save_prefs(d):
             json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------- 本地批注
+# 批注不写入 Markdown 文件：它们属于阅读器的个人工作层，和原稿分离，
+# 不会污染 Git diff，也不会影响其他编辑器打开同一份文档。
+def comments_file():
+    return STATE_DIR / "comments.json"
+
+
+def load_comments_store():
+    f = comments_file()
+    if f.exists():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("documents", {}), dict):
+                return data
+        except (ValueError, OSError):
+            pass
+    return {"version": 1, "documents": {}}
+
+
+def save_comments_store(data):
+    """保存本地批注。
+
+    NamedTemporaryFile 在部分 Windows 安全软件监控的用户目录会阻塞，因此
+    这里使用与偏好设置相同的直接写入策略；批注文件损坏时会自动忽略重建。
+    """
+    STATE_DIR.mkdir(exist_ok=True)
+    target = comments_file()
+    target.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
+def comments_for(path):
+    key = str(Path(path).resolve())
+    with COMMENT_LOCK:
+        return load_comments_store().get("documents", {}).get(key, [])
+
+
+def mutate_comments(path, operation, payload):
+    """返回该文档的最新批注列表；只允许操作已在本程序打开过的文件。"""
+    target = Path(path).resolve()
+    key = str(target)
+    if key not in STATE["opened"] or not target.is_file():
+        raise PermissionError("只能给已在阅读器中打开的文档添加批注")
+
+    with COMMENT_LOCK:
+        store = load_comments_store()
+        docs = store.setdefault("documents", {})
+        items = docs.setdefault(key, [])
+        now = int(time.time())
+
+        if operation == "add":
+            quote = str(payload.get("quote", "")).strip()
+            body = str(payload.get("body", "")).strip()
+            if not quote or not body:
+                raise ValueError("请选择文字并填写批注")
+            if len(quote) > MAX_COMMENT_QUOTE or len(body.encode("utf-8")) > MAX_COMMENT_BYTES:
+                raise ValueError("批注内容过长")
+            items.append({
+                "id": uuid.uuid4().hex,
+                "quote": quote,
+                "body": body,
+                "prefix": str(payload.get("prefix", ""))[-180:],
+                "suffix": str(payload.get("suffix", ""))[:180],
+                "created": now,
+                "updated": now,
+                "resolved": False,
+            })
+        elif operation in ("resolve", "delete"):
+            comment_id = str(payload.get("id", ""))
+            index = next((i for i, item in enumerate(items) if item.get("id") == comment_id), -1)
+            if index < 0:
+                raise ValueError("找不到这条批注")
+            if operation == "delete":
+                items.pop(index)
+            else:
+                items[index]["resolved"] = not bool(items[index].get("resolved"))
+                items[index]["updated"] = now
+        else:
+            raise ValueError("未知的批注操作")
+
+        if not items:
+            docs.pop(key, None)
+        save_comments_store(store)
+        return docs.get(key, [])
 
 
 # ---------------------------------------------------------------- 文件树
@@ -178,6 +269,11 @@ def pick_path(kind):
         r.attributes("-topmost", True)
         if kind == "dir":
             out["p"] = filedialog.askdirectory(title="选择文档文件夹")
+        elif kind == "image":
+            out["p"] = filedialog.askopenfilename(
+                title="插入图片",
+                filetypes=[("图片", "*.png *.jpg *.jpeg *.gif *.webp *.bmp *.svg"),
+                           ("所有文件", "*.*")])
         else:
             out["p"] = filedialog.askopenfilename(
                 title="打开 Markdown 文件",
@@ -235,7 +331,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = u.path
 
         if path == "/api/ping":
-            return self._json({"app": "mdreader", "root": STATE["root"],
+            return self._json({"app": "mdreader", "version": APP_VERSION, "root": STATE["root"],
                                "active": time.time() - STATE["last_seen"] < 12})
 
         if path in ("/", "/index.html"):
@@ -299,6 +395,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/prefs":
             return self._json(load_prefs())
 
+        if path == "/api/comments":
+            source = q.get("p", [""])[0]
+            if not source:
+                return self._err(400, "缺少文档路径")
+            return self._json({"comments": comments_for(source)})
+
         if path == "/api/reveal":                   # 在资源管理器里定位
             f = Path(q.get("p", [""])[0])
             if f.exists() and sys.platform == "win32":
@@ -331,6 +433,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/prefs":
             save_prefs(body)
             return self._json({"ok": True})
+
+        if u.path == "/api/comments":
+            path = body.get("path")
+            if not isinstance(path, str) or not path:
+                return self._err(400, "缺少文档路径")
+            try:
+                comments = mutate_comments(path, body.get("op"), body)
+            except PermissionError as err:
+                return self._err(403, str(err))
+            except ValueError as err:
+                return self._err(400, str(err))
+            except OSError:
+                return self._err(500, "批注保存失败")
+            return self._json({"ok": True, "comments": comments})
 
         if u.path == "/api/save":
             path = body.get("path")

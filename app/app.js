@@ -18,7 +18,10 @@ var S = {
   editMode: null,       // null | visual（所见即所得）| source（Markdown 源码）
   dirty: false,
   diskChanged: false,
-  saving: false
+  saving: false,
+  comments: [],
+  commentAnchor: null,
+  savedSelection: null
 };
 
 /* ------------------------------------------------ 基础工具 */
@@ -87,6 +90,222 @@ var LS = {
   },
   set: function (k, v) { try { localStorage.setItem('md.' + k, JSON.stringify(v)); } catch (e) {} }
 };
+
+/* ------------------------------------------------ 侧边批注
+   批注锚定到“选中文字 + 前后文”，渲染时再次寻找这段文字。这样正文继续是
+   纯 Markdown；即使文件被别的工具调整过，只要原句还在，批注仍能找回来。 */
+function normalizeQuote(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function selectedCommentAnchor() {
+  var selection = window.getSelection();
+  var content = $('#content');
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed ||
+      S.editMode === 'source') return null;
+  var range = selection.getRangeAt(0);
+  if (!content.contains(range.commonAncestorContainer)) return null;
+  var quote = normalizeQuote(range.toString());
+  if (!quote) return null;
+  if (quote.length > 700) { toast('单条批注最多选中 700 个字符', 2800); return null; }
+
+  var before = range.cloneRange();
+  before.selectNodeContents(content);
+  before.setEnd(range.startContainer, range.startOffset);
+  var documentText = normalizeQuote(content.innerText || content.textContent);
+  var beforeText = normalizeQuote(before.toString());
+  var estimated = Math.max(0, beforeText.length - Math.min(quote.length, 8));
+  var at = documentText.indexOf(quote, estimated);
+  if (at < 0) at = documentText.indexOf(quote);
+  return {
+    quote: quote,
+    prefix: at < 0 ? beforeText.slice(-180) : documentText.slice(Math.max(0, at - 180), at),
+    suffix: at < 0 ? '' : documentText.slice(at + quote.length, at + quote.length + 180),
+    range: range.cloneRange()
+  };
+}
+
+function rememberVisualSelection() {
+  var selection = window.getSelection();
+  var content = $('#content');
+  if (!selection || !selection.rangeCount) return;
+  var range = selection.getRangeAt(0);
+  if (content.contains(range.commonAncestorContainer)) S.savedSelection = range.cloneRange();
+}
+
+function restoreVisualSelection() {
+  if (!S.savedSelection || S.editMode !== 'visual') return false;
+  var content = $('#content');
+  if (!content.contains(S.savedSelection.commonAncestorContainer)) return false;
+  var selection = window.getSelection();
+  selection.removeAllRanges(); selection.addRange(S.savedSelection);
+  content.focus();
+  return true;
+}
+
+function updateCommentPop() {
+  var pop = $('#comment-pop');
+  var anchor = selectedCommentAnchor();
+  if (!anchor) { pop.classList.add('hidden'); return; }
+  S.commentAnchor = anchor;
+  var rect = anchor.range.getBoundingClientRect();
+  if (!rect.width && !rect.height) { pop.classList.add('hidden'); return; }
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - 130, rect.left + rect.width / 2 - 54)) + 'px';
+  pop.style.top = Math.max(8, rect.bottom + 8) + 'px';
+  pop.classList.remove('hidden');
+}
+
+function commentTextNodes() {
+  var nodes = [];
+  var walker = document.createTreeWalker($('#content'), NodeFilter.SHOW_TEXT, {
+    acceptNode: function (node) {
+      if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+      var parent = node.parentElement;
+      if (!parent || parent.closest('.copy, .lang, .md-protected, .katex')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  var node;
+  while ((node = walker.nextNode())) nodes.push(node);
+  return nodes;
+}
+
+function rangeForComment(comment) {
+  var quote = String(comment.quote || '');
+  if (!quote) return null;
+  var nodes = commentTextNodes();
+  var text = nodes.map(function (node) { return node.nodeValue; }).join('');
+  var start = -1;
+  if (comment.prefix) {
+    var around = text.indexOf(comment.prefix + quote);
+    if (around > -1) start = around + comment.prefix.length;
+  }
+  if (start < 0) start = text.indexOf(quote);
+  if (start < 0) return null;
+  var end = start + quote.length, offset = 0, startNode, endNode, startOffset, endOffset;
+  for (var i = 0; i < nodes.length; i++) {
+    var length = nodes[i].nodeValue.length;
+    if (!startNode && start >= offset && start <= offset + length) {
+      startNode = nodes[i]; startOffset = start - offset;
+    }
+    if (end >= offset && end <= offset + length) {
+      endNode = nodes[i]; endOffset = end - offset; break;
+    }
+    offset += length;
+  }
+  if (!startNode || !endNode) return null;
+  var range = document.createRange();
+  try { range.setStart(startNode, startOffset); range.setEnd(endNode, endOffset); } catch (e) { return null; }
+  return range;
+}
+
+function renderCommentHighlights() {
+  if (!window.CSS || !CSS.highlights || !window.Highlight) return;
+  CSS.highlights.delete('mdreader-comment');
+  var highlight = new Highlight();
+  S.comments.filter(function (comment) { return !comment.resolved; }).forEach(function (comment) {
+    var range = rangeForComment(comment);
+    if (range) highlight.add(range);
+  });
+  if (highlight.size) CSS.highlights.set('mdreader-comment', highlight);
+}
+
+function commentDate(seconds) {
+  if (!seconds) return '';
+  var date = new Date(seconds * 1000);
+  return date.getFullYear() + '/' + (date.getMonth() + 1) + '/' + date.getDate();
+}
+
+function renderComments() {
+  var list = $('#comments-list');
+  list.innerHTML = '';
+  $('#comments-count').textContent = S.comments.length;
+  if (!S.comments.length) {
+    list.innerHTML = '<div class="comments-empty">选中正文中的一段文字，即可添加侧边批注。</div>';
+    renderCommentHighlights();
+    return;
+  }
+  S.comments.slice().reverse().forEach(function (comment) {
+    var card = document.createElement('section');
+    card.className = 'comment-card' + (comment.resolved ? ' resolved' : '');
+    var quote = document.createElement('div');
+    quote.className = 'comment-card-quote'; quote.textContent = comment.quote;
+    var body = document.createElement('div');
+    body.className = 'comment-card-body'; body.textContent = comment.body || '';
+    var foot = document.createElement('div'); foot.className = 'comment-card-foot';
+    var date = document.createElement('span'); date.textContent = comment.resolved ? '已解决 · ' : '';
+    date.textContent += commentDate(comment.created);
+    var spacer = document.createElement('span'); spacer.className = 'spacer';
+    var resolve = document.createElement('button'); resolve.className = 'comment-card-action';
+    resolve.textContent = comment.resolved ? '重新打开' : '解决';
+    resolve.addEventListener('click', function () { mutateComment('resolve', comment.id); });
+    var remove = document.createElement('button'); remove.className = 'comment-card-action delete'; remove.textContent = '删除';
+    remove.addEventListener('click', function () {
+      if (window.confirm('删除这条批注？')) mutateComment('delete', comment.id);
+    });
+    foot.appendChild(date); foot.appendChild(spacer); foot.appendChild(resolve); foot.appendChild(remove);
+    card.appendChild(quote); card.appendChild(body); card.appendChild(foot); list.appendChild(card);
+  });
+  renderCommentHighlights();
+}
+
+function loadComments() {
+  if (!S.cur) { S.comments = []; renderComments(); return; }
+  var path = S.cur.path;
+  get('/api/comments', { p: path }).then(function (data) {
+    if (!S.cur || S.cur.path !== path) return;
+    S.comments = Array.isArray(data.comments) ? data.comments : [];
+    renderComments();
+  }).catch(function () { toast('批注读取失败', 2800); });
+}
+
+function openComments(open) {
+  var panel = $('#comments-panel');
+  var shouldOpen = open === undefined ? panel.classList.contains('hidden') : !!open;
+  panel.classList.toggle('hidden', !shouldOpen);
+  if (shouldOpen) renderComments();
+}
+
+function openCommentComposer() {
+  var anchor = selectedCommentAnchor() || S.commentAnchor;
+  if (!S.cur || !anchor || !anchor.quote) { toast('先选中一段正文文字', 2200); return; }
+  S.commentAnchor = anchor;
+  openComments(true);
+  $('#comment-quote').textContent = anchor.quote;
+  $('#comment-input').value = '';
+  $('#comment-compose').classList.remove('hidden');
+  $('#comment-pop').classList.add('hidden');
+  $('#comment-input').focus();
+}
+
+function closeCommentComposer() {
+  $('#comment-compose').classList.add('hidden');
+  $('#comment-input').value = '';
+  S.commentAnchor = null;
+}
+
+function submitComment() {
+  if (!S.cur || !S.commentAnchor) return;
+  var body = $('#comment-input').value.trim();
+  if (!body) { $('#comment-input').focus(); toast('先写下批注内容'); return; }
+  var button = $('#btn-comment-submit'); button.disabled = true;
+  post('/api/comments', {
+    op: 'add', path: S.cur.path, quote: S.commentAnchor.quote,
+    prefix: S.commentAnchor.prefix, suffix: S.commentAnchor.suffix, body: body
+  }).then(function (data) {
+    S.comments = Array.isArray(data.comments) ? data.comments : S.comments;
+    closeCommentComposer(); renderComments(); toast('批注已添加');
+  }).catch(function (err) { toast(err && err.error || '批注保存失败', 3400); })
+    .then(function () { button.disabled = false; });
+}
+
+function mutateComment(operation, id) {
+  if (!S.cur) return;
+  post('/api/comments', { op: operation, path: S.cur.path, id: id }).then(function (data) {
+    S.comments = Array.isArray(data.comments) ? data.comments : S.comments;
+    renderComments();
+  }).catch(function (err) { toast(err && err.error || '批注更新失败', 3400); });
+}
 
 /* ------------------------------------------------ Markdown 预处理
    顺序很重要：先摘出 front matter / 脚注 / 公式，再交给 marked，
@@ -420,7 +639,8 @@ function setEditorMode(mode) {
   content.classList.toggle('visual-editing', visual);
   content.contentEditable = visual ? 'true' : 'false';
   $('#editor-wrap').classList.toggle('hidden', !source);
-  $('#visual-tools').classList.toggle('hidden', !visual);
+  $('#visual-tools').classList.toggle('hidden', !mode);
+  $('#btn-edit').classList.toggle('hidden', !S.cur || !!mode);
   $('#btn-save').classList.toggle('hidden', !mode);
   $('#btn-cancel').classList.toggle('hidden', !mode);
   $('#btn-source').classList.toggle('hidden', !S.cur);
@@ -432,6 +652,7 @@ function setEditorMode(mode) {
     if (visual) el.contentEditable = 'false';
     else el.removeAttribute('contenteditable');
   });
+  if (!visual) renderCommentHighlights();
   updateEditStatus();
 }
 
@@ -495,6 +716,188 @@ function enterVisualEdit(x, y) {
       sel.removeAllRanges(); sel.addRange(range);
     }
   }
+  renderCommentHighlights();
+}
+
+/* ------------------------------------------------ 编辑命令
+   所见模式和源码模式共用同一套工具栏，但各自生成它们最稳定的内容：
+   所见模式只产生受 visualToMarkdown 支持的 HTML；源码模式直接写 Markdown。 */
+function sourceRange() {
+  var editor = $('#editor');
+  return { editor: editor, start: editor.selectionStart, end: editor.selectionEnd,
+           text: editor.value.slice(editor.selectionStart, editor.selectionEnd) };
+}
+
+function sourceReplace(text, start, end) {
+  var editor = $('#editor');
+  start = start == null ? editor.selectionStart : start;
+  end = end == null ? editor.selectionEnd : end;
+  editor.setRangeText(text, start, end, 'end');
+  editor.dispatchEvent(new Event('input'));
+  editor.focus();
+}
+
+function sourceWrap(before, after, placeholder) {
+  var range = sourceRange();
+  var text = range.text || placeholder || '文字';
+  sourceReplace(before + text + after, range.start, range.end);
+  if (!range.text && placeholder) {
+    var cursor = range.start + before.length;
+    range.editor.setSelectionRange(cursor, cursor + text.length);
+  }
+}
+
+function sourceLinePrefix(prefix, numbered) {
+  var range = sourceRange();
+  var value = range.editor.value;
+  var start = value.lastIndexOf('\n', Math.max(0, range.start - 1)) + 1;
+  var endAt = value.indexOf('\n', range.end);
+  if (endAt < 0) endAt = value.length;
+  var lines = value.slice(start, endAt).split('\n');
+  var allPrefixed = lines.every(function (line) { return new RegExp('^\\s*' + prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(line); });
+  var next = lines.map(function (line, index) {
+    if (allPrefixed) return line.replace(new RegExp('^\\s*' + prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '');
+    return (numbered ? (index + 1) + '. ' : prefix) + line;
+  }).join('\n');
+  sourceReplace(next, start, endAt);
+}
+
+function sourceHeading(level) {
+  var range = sourceRange(), value = range.editor.value;
+  var start = value.lastIndexOf('\n', Math.max(0, range.start - 1)) + 1;
+  var end = value.indexOf('\n', range.start); if (end < 0) end = value.length;
+  var line = value.slice(start, end).replace(/^\s{0,3}#{1,6}\s*/, '');
+  sourceReplace('#'.repeat(level) + ' ' + line, start, end);
+}
+
+function sourceInsertBlock(markdown) {
+  var range = sourceRange();
+  var before = range.editor.value.slice(0, range.start);
+  var after = range.editor.value.slice(range.end);
+  var joinBefore = before && !/\n\n$/.test(before) ? (before.endsWith('\n') ? '\n' : '\n\n') : '';
+  var joinAfter = after && !/^\n/.test(after) ? '\n\n' : '';
+  sourceReplace(joinBefore + markdown + joinAfter, range.start, range.end);
+}
+
+function safeUrl(value) {
+  value = String(value || '').trim();
+  if (!value) return '';
+  if (/^javascript:/i.test(value)) return '';
+  if (!/^(https?:|mailto:|#|\/|\.\.?\/)/i.test(value)) value = 'https://' + value;
+  return value;
+}
+
+function markdownImagePath(path) {
+  if (!S.cur) return path;
+  var from = S.cur.dir.replace(/\\/g, '/').split('/');
+  var to = String(path).replace(/\\/g, '/').split('/');
+  if (!from.length || !to.length || from[0].toLowerCase() !== to[0].toLowerCase()) return path.replace(/\\/g, '/');
+  while (from.length && to.length && from[0].toLowerCase() === to[0].toLowerCase()) { from.shift(); to.shift(); }
+  return Array(from.length + 1).join('../') + to.join('/');
+}
+
+function markVisualDirty() {
+  S.dirty = visualToMarkdown() !== S.source;
+  updateWordCount($('#content').innerText);
+  updateEditStatus();
+  rememberVisualSelection();
+}
+
+function visualCommand(command, value) {
+  restoreVisualSelection();
+  document.execCommand(command, false, value == null ? null : value);
+  markVisualDirty();
+}
+
+function insertVisualHtml(html) {
+  restoreVisualSelection();
+  document.execCommand('insertHTML', false, html);
+  markVisualDirty();
+}
+
+function insertImage() {
+  get('/api/pick', { kind: 'image' }).then(function (data) {
+    if (!data.path) return;
+    var source = markdownImagePath(data.path);
+    insertVisualHtml('<img src="' + esc(api('/api/raw', { p: data.path })) + '" data-md-src="' + esc(source) + '" alt="">');
+    toast('图片已插入；保存后会写入 Markdown 引用');
+  }).catch(function () { toast('无法打开图片选择框', 2800); });
+}
+
+function insertSourceImage() {
+  get('/api/pick', { kind: 'image' }).then(function (data) {
+    if (!data.path) return;
+    sourceInsertBlock('![](' + markdownImagePath(data.path) + ')');
+  }).catch(function () { toast('无法打开图片选择框', 2800); });
+}
+
+function sourceAction(action) {
+  var range = sourceRange();
+  if (action === 'bold') return sourceWrap('**', '**', '粗体文字');
+  if (action === 'italic') return sourceWrap('*', '*', '斜体文字');
+  if (action === 'strike') return sourceWrap('~~', '~~', '删除线文字');
+  if (action === 'inline-code') return sourceWrap('`', '`', '代码');
+  if (action === 'underline') return toast('Markdown 没有标准下划线语法；可用源码插入 HTML', 3000);
+  if (action === 'paragraph') {
+    var paragraphRange = sourceRange(), paragraphValue = paragraphRange.editor.value;
+    var paragraphStart = paragraphValue.lastIndexOf('\n', Math.max(0, paragraphRange.start - 1)) + 1;
+    var paragraphEnd = paragraphValue.indexOf('\n', paragraphRange.start); if (paragraphEnd < 0) paragraphEnd = paragraphValue.length;
+    return sourceReplace(paragraphValue.slice(paragraphStart, paragraphEnd).replace(/^\s{0,3}#{1,6}\s*/, ''), paragraphStart, paragraphEnd);
+  }
+  if (action === 'ul') return sourceLinePrefix('- ');
+  if (action === 'ol') return sourceLinePrefix('1. ', true);
+  if (action === 'task') return sourceLinePrefix('- [ ] ');
+  if (action === 'quote') return sourceLinePrefix('> ');
+  if (action === 'code-block') return sourceInsertBlock('```\n' + (range.text || '代码') + '\n```');
+  if (action === 'table') return sourceInsertBlock('| 列 1 | 列 2 | 列 3 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |\n| 内容 | 内容 | 内容 |');
+  if (action === 'divider') return sourceInsertBlock('---');
+  if (action === 'image') return insertSourceImage();
+  if (action === 'link') {
+    var url = safeUrl(window.prompt('链接地址', 'https://'));
+    if (url) sourceWrap('[', '](' + url + ')', range.text || '链接文字');
+    return;
+  }
+  if (action.indexOf('heading-') === 0) return sourceHeading(+action.slice(-1));
+  if (action === 'undo' || action === 'redo') { range.editor.focus(); document.execCommand(action, false, null); return; }
+}
+
+function visualAction(action) {
+  if (action === 'bold') return visualCommand('bold');
+  if (action === 'italic') return visualCommand('italic');
+  if (action === 'underline') return visualCommand('underline');
+  if (action === 'paragraph') return visualCommand('formatBlock', 'p');
+  if (action === 'strike') return visualCommand('strikeThrough');
+  if (action === 'ul') return visualCommand('insertUnorderedList');
+  if (action === 'ol') return visualCommand('insertOrderedList');
+  if (action === 'quote') return visualCommand('formatBlock', 'blockquote');
+  if (action === 'code-block') return visualCommand('formatBlock', 'pre');
+  if (action === 'undo' || action === 'redo') return visualCommand(action);
+  if (action === 'inline-code') {
+    var selection = window.getSelection();
+    var text = selection && selection.toString() || '代码';
+    return insertVisualHtml('<code>' + esc(text) + '</code>');
+  }
+  if (action === 'task') {
+    var taskText = (window.getSelection() && window.getSelection().toString()) || '待办事项';
+    return insertVisualHtml('<ul><li><input type="checkbox" contenteditable="false"> ' + esc(taskText) + '</li></ul>');
+  }
+  if (action === 'table') return insertVisualHtml('<table><thead><tr><th>列 1</th><th>列 2</th><th>列 3</th></tr></thead><tbody><tr><td>内容</td><td>内容</td><td>内容</td></tr><tr><td>内容</td><td>内容</td><td>内容</td></tr></tbody></table><p><br></p>');
+  if (action === 'divider') return insertVisualHtml('<hr><p><br></p>');
+  if (action === 'image') return insertImage();
+  if (action === 'link') {
+    var url = safeUrl(window.prompt('链接地址', 'https://'));
+    if (!url) return;
+    var text = window.getSelection() && window.getSelection().toString();
+    if (!text) return insertVisualHtml('<a href="' + esc(url) + '">' + esc(url) + '</a>');
+    return visualCommand('createLink', url);
+  }
+  if (action.indexOf('heading-') === 0) return visualCommand('formatBlock', 'H' + action.split('-').pop());
+}
+
+function editorAction(action) {
+  if (!S.editing) { enterVisualEdit(); }
+  if (S.editMode === 'source') sourceAction(action);
+  else visualAction(action);
 }
 
 function mdText(value) {
@@ -522,6 +925,7 @@ function inlineMarkdown(node) {
   var inner = Array.from(el.childNodes).map(inlineMarkdown).join('');
   if (/^(STRONG|B)$/.test(el.tagName)) return '**' + inner + '**';
   if (/^(EM|I)$/.test(el.tagName)) return '*' + inner + '*';
+  if (el.tagName === 'U') return '<u>' + inner + '</u>';
   if (/^(DEL|S|STRIKE)$/.test(el.tagName)) return '~~' + inner + '~~';
   if (el.tagName === 'CODE') {
     var ticks = inner.indexOf('`') > -1 ? '``' : '`';
@@ -613,6 +1017,7 @@ function renderSource(source, dir) {
   enhance(content, dir);
   updateWordCount(source);
   buildOutline();
+  renderCommentHighlights();
 }
 
 function saveDoc() {
@@ -679,8 +1084,11 @@ function openDoc(path, opt) {
     S.source = d.content;
     S.dirty = false;
     S.diskChanged = false;
+    S.comments = [];
+    closeCommentComposer();
     setEditorMode(false);
     renderSource(d.content, d.dir);
+    loadComments();
 
     var short = d.name.replace(/\.(md|markdown|mdx|txt)$/i, '');
     $('#doc-title').textContent = short;
@@ -766,17 +1174,68 @@ function addRecent(path, name) {
   LS.set('recents', list.slice(0, 40));
   renderRecent();
 }
+function recentGroup(time) {
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  var then = new Date(Number(time) || 0);
+  then.setHours(0, 0, 0, 0);
+  var days = Math.floor((today - then) / 86400000);
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days <= 7) return '近 7 天';
+  return '更早';
+}
+function recentTime(time) {
+  var d = new Date(Number(time) || 0);
+  if (recentGroup(time) === '今天') return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  if (recentGroup(time) === '昨天') return '昨天';
+  return (d.getMonth() + 1) + ' 月 ' + d.getDate() + ' 日';
+}
+function removeRecent(path) {
+  LS.set('recents', LS.get('recents', []).filter(function (item) { return item.path !== path; }));
+  renderRecent();
+  toast('已从最近查看移除，原文件未删除');
+}
 function renderRecent() {
   var list = LS.get('recents', []);
   var pane = $('#pane-recent');
   if (!list.length) { pane.innerHTML = '<div class="pane-tip">还没有打开过文件。</div>'; return; }
   pane.innerHTML = '';
-  list.forEach(function (r) {
-    var d = document.createElement('div');
-    d.className = 'recent-item';
-    d.innerHTML = '<div class="nm">' + esc(r.name) + '</div><div class="sub">' + esc(r.path) + '</div>';
-    d.addEventListener('click', function () { openDoc(r.path); });
-    pane.appendChild(d);
+  var groups = ['今天', '昨天', '近 7 天', '更早'];
+  groups.forEach(function (groupName) {
+    var items = list.filter(function (item) { return recentGroup(item.time) === groupName; });
+    if (!items.length) return;
+    var group = document.createElement('section');
+    group.className = 'recent-group';
+    var title = document.createElement('div');
+    title.className = 'recent-group-title';
+    title.textContent = groupName + ' · ' + items.length;
+    group.appendChild(title);
+    items.forEach(function (r) {
+      var d = document.createElement('div');
+      d.className = 'recent-item';
+      d.tabIndex = 0;
+      var main = document.createElement('div');
+      main.className = 'recent-main';
+      var name = document.createElement('div');
+      name.className = 'nm'; name.textContent = r.name || '未命名文档';
+      var path = document.createElement('div');
+      path.className = 'sub'; path.textContent = r.path;
+      main.appendChild(name); main.appendChild(path);
+      var meta = document.createElement('div');
+      meta.className = 'recent-meta'; meta.textContent = recentTime(r.time);
+      var remove = document.createElement('button');
+      remove.className = 'recent-remove'; remove.type = 'button'; remove.textContent = '移除';
+      remove.title = '从最近查看移除（不删除原文件）';
+      remove.addEventListener('click', function (event) { event.stopPropagation(); removeRecent(r.path); });
+      d.appendChild(main); d.appendChild(meta); d.appendChild(remove);
+      d.addEventListener('click', function () { openDoc(r.path); });
+      d.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDoc(r.path); }
+      });
+      group.appendChild(d);
+    });
+    pane.appendChild(group);
   });
 }
 
@@ -1100,6 +1559,7 @@ function bind() {
       return;
     }
     if (S.editing) return;
+    if (window.getSelection && !window.getSelection().isCollapsed) return;
     if (e.target.closest('a, button, input, img, .mermaid-box, .katex')) return;
     var block = e.target.closest(
       'h1, h2, h3, h4, h5, h6, p, li, pre, blockquote, table, .front-matter'
@@ -1113,10 +1573,11 @@ function bind() {
   });
   $('#content').addEventListener('input', function () {
     if (S.editMode !== 'visual') return;
-    S.dirty = visualToMarkdown() !== S.source;
-    updateWordCount(this.innerText);
-    updateEditStatus();
+    markVisualDirty();
   });
+  $('#content').addEventListener('mouseup', function () { setTimeout(updateCommentPop, 0); });
+  $('#content').addEventListener('keyup', function () { setTimeout(updateCommentPop, 0); });
+  $('#btn-edit').addEventListener('click', function () { enterVisualEdit(); });
   $('#btn-save').addEventListener('click', saveDoc);
   $('#btn-cancel').addEventListener('click', cancelEdit);
   $('#btn-source').addEventListener('click', function () {
@@ -1139,17 +1600,28 @@ function bind() {
     if (e.target.closest('button')) e.preventDefault();
   });
   $('#block-style').addEventListener('change', function () {
-    document.execCommand('formatBlock', false, this.value);
-    $('#content').dispatchEvent(new Event('input'));
-    $('#content').focus();
+    editorAction(this.value === 'p' ? 'paragraph' : 'heading-' + this.value.slice(1));
   });
-  [['#fmt-bold', 'bold'], ['#fmt-italic', 'italic'], ['#fmt-ul', 'insertUnorderedList'],
-   ['#fmt-ol', 'insertOrderedList']].forEach(function (item) {
+  [['#fmt-undo', 'undo'], ['#fmt-redo', 'redo'], ['#fmt-bold', 'bold'], ['#fmt-italic', 'italic'],
+   ['#fmt-underline', 'underline'], ['#fmt-strike', 'strike'], ['#fmt-inline-code', 'inline-code'],
+   ['#fmt-link', 'link'], ['#fmt-ul', 'ul'], ['#fmt-ol', 'ol'], ['#fmt-task', 'task'],
+   ['#fmt-quote', 'quote'], ['#fmt-code-block', 'code-block'], ['#fmt-table', 'table'],
+   ['#fmt-divider', 'divider'], ['#fmt-image', 'image']].forEach(function (item) {
     $(item[0]).addEventListener('click', function () {
-      document.execCommand(item[1], false, null);
-      $('#content').dispatchEvent(new Event('input'));
-      $('#content').focus();
+      editorAction(item[1]);
     });
+  });
+  $('#btn-comments').addEventListener('click', function () {
+    if (selectedCommentAnchor()) openCommentComposer(); else openComments();
+  });
+  $('#btn-comments-close').addEventListener('click', function () { openComments(false); });
+  $('#btn-add-comment').addEventListener('click', openCommentComposer);
+  $('#btn-comment-cancel').addEventListener('click', closeCommentComposer);
+  $('#btn-comment-submit').addEventListener('click', submitComment);
+  document.addEventListener('selectionchange', function () {
+    clearTimeout(updateCommentPop._timer);
+    updateCommentPop._timer = setTimeout(updateCommentPop, 40);
+    rememberVisualSelection();
   });
   $('#btn-print').addEventListener('click', function () { window.print(); });
   $('#btn-back').addEventListener('click', function () { goHistory(-1); });
@@ -1263,6 +1735,11 @@ function bind() {
       else enterSourceEdit(fallbackSourceOffset());
       return;
     }
+    if (ctrl && e.altKey && e.key.toLowerCase() === 'm') {
+      e.preventDefault();
+      openCommentComposer();
+      return;
+    }
     if (S.editing) return;
     if (ctrl && e.key.toLowerCase() === 'f') { e.preventDefault(); openFind(); return; }
     if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); $('#btn-sidebar').click(); return; }
@@ -1284,6 +1761,7 @@ function bind() {
       closeFind();
       $('#lightbox').classList.add('hidden');
       $('#palette-pop').classList.add('hidden');
+      $('#comment-pop').classList.add('hidden');
       return;
     }
     if (e.key === 'F3') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }

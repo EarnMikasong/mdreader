@@ -37,7 +37,7 @@ else:
 # 默认仍保存在用户目录。环境变量只用于隔离测试或便携运行，避免测试污染真实记录。
 STATE_DIR = Path(os.environ.get("MDREADER_STATE_DIR", str(Path.home() / ".mdreader"))).expanduser()
 DEFAULT_PORT = 7333
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 MD_EXT = {".md", ".markdown", ".mdown", ".mkd", ".mdx", ".txt"}
 SKIP_DIRS = {".git", ".svn", ".hg", "node_modules", "__pycache__", ".idea", ".vscode",
              "venv", ".venv", "env", "dist", "build", ".next", ".cache", ".obsidian"}
